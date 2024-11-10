@@ -86,6 +86,20 @@ def f1(solution, p):
             
     return solution
 
+def f2(solution, p):
+    assets_maintained_by_teams = solution.h.sum(axis=0)
+    
+    max_assets_maintained = assets_maintained_by_teams.max()
+    min_assets_maintained = assets_maintained_by_teams.min()
+
+    result = max_assets_maintained - min_assets_maintained
+
+    solution.fitness = result
+    solution.penalty = penalizacao_restricoes(solution, p)
+    solution.penalized_fitness = solution.fitness + solution.penalty
+            
+    return solution
+
 def initialize_solution(p, apply_constructive_heuristic=False):
     num_ativos = len(p.n)
     num_bases = len(p.m)
@@ -254,7 +268,6 @@ def visualize_network(p, solution, fobj):
                         break
                 if team_responsible is not None:
                     label = f"Equipe {team_responsible}"
-                    # Only add label if it hasn't been used
                     if label not in used_labels:
                         plt.plot(
                             [base[1], ativo[1]], [base[0], ativo[0]],
@@ -262,7 +275,6 @@ def visualize_network(p, solution, fobj):
                         )
                         used_labels.add(label)
                     else:
-                        # Add the line without a label
                         plt.plot(
                             [base[1], ativo[1]], [base[0], ativo[0]],
                             color=team_colors[team_responsible], linestyle='--', linewidth=0.5
@@ -286,13 +298,24 @@ def visualize_network(p, solution, fobj):
 
 p = probdef()
 
+# F1
 results_f1 = optimize(p, f1)
 std_dev_f1, max_sol_f1, min_sol_f1 = get_metrics(results_f1)
 
-print(f"Desvio Padrao - F1: {std_dev_f1}")
-print(f"Maximo - F1: {max_sol_f1.penalized_fitness}")
-print(f"Minimo - F1: {min_sol_f1.penalized_fitness}")
+print(f"Desvio Padrao - f1: {std_dev_f1}")
+print(f"Máximo - f1: {max_sol_f1.penalized_fitness}")
+print(f"Mínimo - f1: {min_sol_f1.penalized_fitness}")
 
-plot_convergence(results_f1, "F1")
+plot_convergence(results_f1, "f1")
+visualize_network(p, min_sol_f1, "f1")
 
-visualize_network(p, min_sol_f1, "F1")
+# F2
+results_f2 = optimize(p, f2)
+std_dev_f2, max_sol_f2, min_sol_f2 = get_metrics(results_f2)
+
+print(f"Desvio Padrao - f2: {std_dev_f2}")
+print(f"Máximo - f2: {max_sol_f2.penalized_fitness}")
+print(f"Mínimo - f2: {min_sol_f2.penalized_fitness}")
+
+plot_convergence(results_f2, "f2")
+visualize_network(p, min_sol_f2, "f2")
