@@ -4,7 +4,6 @@ import statistics
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import matplotlib.pyplot as plt
-import networkx as nx
 
 """ 
 n = ativo
@@ -219,8 +218,8 @@ def plot_convergence(results, fobj):
     plt.savefig(f"ev_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
 
 def visualize_network(p, solution, fobj):
-    G = nx.Graph()
-    
+    active_base = []
+    available_base = []
     for base in p.m:
         is_occupied = False
         for team in p.s:
@@ -228,19 +227,23 @@ def visualize_network(p, solution, fobj):
                 is_occupied = True
                 break
         node_type = "base" if not is_occupied else "active_base"
-        G.add_node(base, node_type=node_type, status='available')
-        
+        if (node_type == "base"):
+            available_base.append(base)
+        else:
+            active_base.append(base)
 
-    for ativo in p.n:
-        G.add_node(ativo, node_type='ativo')
-    
+    active_base_lat, active_base_lon = zip(*active_base)  
+    available_base_lat, available_base_lon = zip(*available_base)  
+    lat_n, lon_n = zip(*p.n)
+
     team_colors = {
         team: color for team, color in zip(p.s, ['#1f78b4', '#33a02c', '#e31a1c'])
     }
+
+    plt.figure(figsize=(10, 8))
     
-    edge_colors = []
-    edge_labels = {}
-    
+    used_labels = set()
+
     for ativo in p.n:
         for base in p.m:
             if solution.x.loc[ativo, base] == 1:
@@ -250,38 +253,35 @@ def visualize_network(p, solution, fobj):
                         team_responsible = team
                         break
                 if team_responsible is not None:
-                    G.add_edge(base, ativo, node_type=team_responsible)
-                    edge_colors.append(team_colors[team_responsible])
-                    edge_labels[(base, ativo)] = team_responsible
-    
-    plt.figure(figsize=(10, 7))
-    
-    pos = {node: node for node in G.nodes}
-    
-    base_nodes = [node for node, data in G.nodes(data=True) if data['node_type'] == 'base']
-    active_base_nodes = [node for node, data in G.nodes(data=True) if data['node_type'] == 'active_base']
-    ativo_nodes = [node for node, data in G.nodes(data=True) if data['node_type'] == 'ativo']
+                    label = f"Equipe {team_responsible}"
+                    # Only add label if it hasn't been used
+                    if label not in used_labels:
+                        plt.plot(
+                            [base[1], ativo[1]], [base[0], ativo[0]],
+                            color=team_colors[team_responsible], linestyle='--', linewidth=0.5, label=label
+                        )
+                        used_labels.add(label)
+                    else:
+                        # Add the line without a label
+                        plt.plot(
+                            [base[1], ativo[1]], [base[0], ativo[0]],
+                            color=team_colors[team_responsible], linestyle='--', linewidth=0.5
+                        )
 
-    nx.draw_networkx_nodes(G, pos, nodelist=base_nodes, node_color='#66c2a5', node_shape='s', 
-                           label='Base Disponível', node_size=100, edgecolors='black', linewidths=1.5)
-    nx.draw_networkx_nodes(G, pos, nodelist=active_base_nodes, node_color='#fc8d62', node_shape='D', 
-                           label='Base Ocupada', node_size=100, edgecolors='black', linewidths=1.5)
-    nx.draw_networkx_nodes(G, pos, nodelist=ativo_nodes, node_color='#8da0cb', node_shape='o', 
-                           label='Ativo', node_size=50, edgecolors='black', linewidths=1)
-    
-    edges = list(G.edges())
-    nx.draw_networkx_edges(G, pos, edgelist=edges, edge_color=edge_colors, width=1.5, alpha=0.7, style="dashed")
-
-    for team, color in team_colors.items():
-        plt.plot([], [], color=color, label=f'Equipe {team}', linewidth=2, linestyle='--')
+    plt.scatter(active_base_lon, active_base_lat, color='#fc8d62', label='Base Ocupada', edgecolors='black', linewidths=1.5, marker='p', s=100)
+    plt.scatter(available_base_lon, available_base_lat, color='#66c2a5', label='Base Disponível', edgecolors='black', linewidths=1.5, marker='p', s=100)
+    plt.scatter(lon_n, lat_n, color='#8da0cb', label='Ativo', edgecolors='black', linewidths=1, marker='o')
     
     plt.legend(scatterpoints=1, markerscale=1, loc='upper left', 
                bbox_to_anchor=(1.05, 1), frameon=True, fancybox=True, shadow=True, 
                borderpad=1.2, fontsize=10)
-    
-    plt.axis('off')
-    plt.grid(False)
-    
+    plt.xlabel('Longitude', fontweight="bold")
+    plt.ylabel('Latitude', fontweight="bold")
+
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
     plt.savefig(f"network_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
 
 p = probdef()
@@ -294,4 +294,5 @@ print(f"Maximo - F1: {max_sol_f1.penalized_fitness}")
 print(f"Minimo - F1: {min_sol_f1.penalized_fitness}")
 
 plot_convergence(results_f1, "F1")
+
 visualize_network(p, min_sol_f1, "F1")
