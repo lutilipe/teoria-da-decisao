@@ -4,6 +4,8 @@ import statistics
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 import matplotlib.pyplot as plt
+import copy
+from concurrent.futures import as_completed
 
 """ 
 n = ativo
@@ -100,45 +102,59 @@ def f2(solution, p):
             
     return solution
 
-def initialize_solution(p, apply_constructive_heuristic=False):
-    num_ativos = len(p.n)
-    num_bases = len(p.m)
-    num_equipes = len(p.s)
+def heuristica_construtiva(X, Y, H, p):
+    n_bases = len(p.m)
+    n_ativos = len(p.n)
+    s_equipes = len(p.s)
+    min_ativos_por_equipe = max(1, int(0.2 * n_ativos / s_equipes))
 
+    bases_selecionadas = []
+    for equipe in p.s:
+        base = p.m[equipe % n_bases]
+        Y.loc[base, equipe] = 1
+        bases_selecionadas.append(base)
+
+    for ativo in p.n:
+        base_mais_proxima = min(
+            bases_selecionadas,
+            key=lambda base: p.d.loc[ativo, base] if Y.loc[base].sum() > 0 else float('inf')
+        )
+        X.loc[ativo, base_mais_proxima] = 1
+
+        for equipe in p.s:
+            if Y.loc[base_mais_proxima, equipe] == 1:
+                H.loc[ativo, equipe] = 1
+                break
+
+    for base in bases_selecionadas:
+        ativos_na_base = X.loc[:, base].sum()
+        while ativos_na_base < min_ativos_por_equipe:
+            for outra_base in bases_selecionadas:
+                if X.loc[:, outra_base].sum() > min_ativos_por_equipe:
+                    ativo_realocado = X.loc[:, outra_base].idxmax()
+                    X.loc[ativo_realocado, outra_base] = 0
+                    X.loc[ativo_realocado, base] = 1
+                    for equipe in p.s:
+                        if Y.loc[base, equipe] == 1:
+                            H.loc[ativo_realocado, equipe] = 1
+                            break
+                    ativos_na_base += 1
+                    break
+
+def initialize_solution(p):
     solution = Struct()
 
-    X = pd.DataFrame(np.random.rand(num_ativos, num_bases), 
+    X = pd.DataFrame(0, 
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=pd.MultiIndex.from_tuples(p.m))
-    Y = pd.DataFrame(np.random.rand(num_bases, num_equipes), 
+    Y = pd.DataFrame(0, 
                     index=pd.MultiIndex.from_tuples(p.m), 
                     columns=p.s)
-    H = pd.DataFrame(np.random.rand(num_ativos, num_equipes), 
+    H = pd.DataFrame(0, 
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=p.s)
 
-    if apply_constructive_heuristic:
-        X.loc[:, :] = 0
-        Y.loc[:, :] = 0
-        H.loc[:, :] = 0
-        
-        occupied_bases = []
-        for team in p.s:
-            base = p.m[team % num_bases]
-            Y.loc[base, team] = 1
-            occupied_bases.append(base)
-
-        occupied_bases = list(set(occupied_bases))
-        num_occupied_bases = len(occupied_bases)
-
-        for i, asset in enumerate(p.n):
-            base = occupied_bases[i % num_occupied_bases]
-            X.loc[asset, base] = 1
-
-            for team in p.s:
-                if Y.loc[base, team] == 1:
-                    H.loc[asset, team] = 1
-                    break 
+    heuristica_construtiva(X,Y,H,p)
 
     solution.x, solution.y, solution.h = X, Y, H
     return solution
@@ -148,15 +164,147 @@ def neighborhood_change(current_solution, new_solution, k):
         return new_solution, 1
     return current_solution, k + 1
 
-def local_search_first_improvement(solution, p):
-    current_solution = solution
+def best_improvement_local_search(objective_function, solution, p):
+    # Função para realizar a busca local de melhoramento
+    current_solution = copy.deepcopy(solution)
+    improved = True
 
+    # Loop até que não haja mais melhorias na solução
+    while improved:
+        improved = False
+        # Sacudir a solução e aplicar a função objetivo
+        new_solution = shake(current_solution, 2, p)
+        new_solution = objective_function(new_solution, p)
+        
+        # Se a nova solução for melhor, atualizar a solução atual
+        if new_solution.penalized_fitness < current_solution.penalized_fitness:
+            current_solution = new_solution
+            improved = True
 
-def GVNS(initial_solution, objective_function, p):
-    max_num_evaluations = 10
+    return current_solution
+
+def ativos_por_base(base, X):
+    ativos = list()
+    for i in p.n:
+        if X.loc[i, base] == 1:
+            ativos.append(i)
+    return ativos
+
+def bases_com_equipes(Y):
+    bases = list()
+    for j in p.m:
+        for k in p.s:
+            if Y.loc[j, k] == 1:
+                bases.append(j)
+    return bases
+
+def swap_Ativo_Base(solution, p):
+    # Realocação de duas tarefas aleatórias entre duas máquinas.
+    # Selecionar dois ativos aleatórios que estão alocados a bases diferentes e trocar suas alocações.
+
+    bases_ativas = bases_com_equipes(solution.y)
+
+    base1 = bases_ativas[np.random.randint(0, len(bases_ativas))]
+    ativos1 = ativos_por_base(base1, solution.x)
+    ativo1 = ativos1[np.random.randint(0, len(ativos1))]
+
+    bases_ativas.remove(base1)
+    base2 = bases_ativas[np.random.randint(0, len(bases_ativas))]
+    ativos2 = ativos_por_base(base2, solution.x)
+    ativo2 = ativos2[np.random.randint(0, len(ativos2))]
+
+    solution.x.loc[ativo1, base1] = 0
+    solution.x.loc[ativo2, base2] = 0
+    solution.x.loc[ativo2, base1] = 1
+    solution.x.loc[ativo1, base2] = 1
+
+    for k in p.s:
+        if solution.h.loc[ativo1, k] == 1:
+            equipe1 = k
+        if solution.h.loc[ativo2, k] == 1:
+            equipe2 = k
+
+    solution.h.loc[ativo1, equipe1] = 0
+    solution.h.loc[ativo2, equipe2] = 0
+    solution.h.loc[ativo2, equipe1] = 1
+    solution.h.loc[ativo1, equipe2] = 1
+
+    return solution
+
+def taskMove_Ativo(solution, p):
+    # Movimentação de uma tarefa de uma máquina de origem para uma outra máquina.
+    # Um único ativo é movido de sua base atual para uma nova base sem uma troca direta com outro ativo. Não é uma troca, aqui todos os ativos seguintes à nova posição serão modificados também
+
+    ativo = p.n[np.random.randint(0, len(p.n))]
+
+    bases_ativas = bases_com_equipes(solution.y)
+
+    for j in bases_ativas:
+        if solution.x.loc[ativo, j] == 1:
+            base_atual = j
+            break
+
+    bases_ativas.remove(base_atual)
+    base_nova = bases_ativas[np.random.randint(0, len(bases_ativas))]
+
+    equipes = copy.deepcopy(p.s)
+
+    for k in equipes:
+        if solution.h.loc[ativo, k] == 1:
+            equipe_atual = k
+            break
+
+    equipes.remove(equipe_atual)
+    equipe_nova = np.random.choice(equipes)
+
+    solution.x.loc[ativo, base_atual] = 0
+    solution.x.loc[ativo, base_nova] = 1
+    solution.h.loc[ativo, equipe_atual] = 0
+    solution.h.loc[ativo, equipe_nova] = 1
+
+    return solution
+
+def taskMove_Equipe(solution, p):
+    # Movimentação de uma tarefa de uma máquina de origem para uma outra máquina.
+    # Realocação de uma equipe inteira de uma base para outra, mantendo seus ativos.
+
+    equipe = np.random.choice(p.s)
+    bases_disponiveis = copy.deepcopy(p.m)
+
+    for j in bases_disponiveis:
+        if solution.y.loc[j, equipe] == 1:
+            base_atual = j
+            bases_disponiveis.remove(j)
+            break
+    base_nova = bases_disponiveis[np.random.randint(0, len(bases_disponiveis))]
+    solution.y.loc[base_atual, equipe] = 0
+    solution.y.loc[base_nova, equipe] = 1
+
+    for i in p.n:
+        if solution.x.loc[i, base_atual] == 1:
+            solution.x.loc[i, base_atual] = 0
+        if solution.x.loc[i, base_nova] == 0:
+            solution.x.loc[i, base_nova] = 1
+
+    return solution
+
+def shake(solution, k, p):
+    new_solution = copy.deepcopy(solution)
+    if k == 1:
+        return taskMove_Equipe(new_solution, p)
+    elif k == 2:
+        return taskMove_Ativo(new_solution, p)
+    elif k == 3:
+        return swap_Ativo_Base(new_solution, p)
+
+def GVNS(objective_function, p):
+    initial_solution = initialize_solution(p)
+
+    max_num_evaluations = 30
     num_evaluations = 0
     k_max = 3
     
+    initial_solution = objective_function(initial_solution, p)
     current_solution = initial_solution
     new_solution = initial_solution
 
@@ -168,11 +316,11 @@ def GVNS(initial_solution, objective_function, p):
     while num_evaluations < max_num_evaluations:
         k = 1
         while k <= k_max:
-            #new_solution = shake(current_solution, k, p)
-            #new_solution = local_search_first_improvement(new_solution, p)
+            new_solution = shake(current_solution, k, p)
+            new_solution = best_improvement_local_search(objective_function, new_solution, p)
             new_solution = objective_function(new_solution, p)
+            
             num_evaluations += 1
-            new_solution.id = num_evaluations
 
             current_solution, k = neighborhood_change(current_solution, new_solution, k)
 
@@ -180,13 +328,11 @@ def GVNS(initial_solution, objective_function, p):
             history.penalty.append(current_solution.penalty)
             history.penalized_fitness.append(current_solution.penalized_fitness)
 
-            print(num_evaluations)
-            
     return current_solution, history
 
-def optimize_instance(objective_function, p):
-    initial_solution = initialize_solution(p, True)
-    best_solution, history = GVNS(initial_solution, objective_function, p)
+def optimize_instance(objective_function, p, seed):
+    np.random.seed(seed)
+    best_solution, history = GVNS(objective_function, p)
     return best_solution, history
 
 def optimize(p, objective_function):
@@ -195,8 +341,10 @@ def optimize(p, objective_function):
     num_instances = 5 
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-        futures = [executor.submit(optimize_instance, objective_function, p) for _ in range(num_instances)]
-        results = [future.result() for future in futures]
+        futures = [executor.submit(optimize_instance, objective_function, copy.deepcopy(p), seed=np.random.randint(0, 10000)) for _ in range(num_instances)]
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
     return results
 
 def get_metrics(results):
@@ -219,14 +367,18 @@ def get_metrics(results):
 
 def plot_convergence(results, fobj):
     histories = [x[1] for x in results]
-    plt.figure(figsize=(10, 6))
-    for history in histories:
-        s = len(history.penalized_fitness)
-        plt.plot(np.linspace(0, s-1, s), history.penalized_fitness, 'k-', alpha=0.7)
+    plt.figure(figsize=(10, 8))
+    
+    colors = plt.cm.viridis(np.linspace(0, 1, len(histories)))
 
+    for idx, history in enumerate(histories):
+        s = len(history.penalized_fitness)
+        plt.plot(np.linspace(0, s-1, s), history.penalized_fitness, color=colors[idx], alpha=0.7, label=f'Teste {idx+1}')
+    
     plt.title(f'Evolução da qualidade da solução candidata - {fobj}')
     plt.ylabel('fitness(x) penalizado')
     plt.xlabel('Número de avaliações')
+    plt.legend(title="Testes")
     plt.grid(True)
     
     plt.savefig(f"ev_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
