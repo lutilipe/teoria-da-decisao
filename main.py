@@ -165,21 +165,19 @@ def neighborhood_change(current_solution, new_solution, k):
     return current_solution, k + 1
 
 def best_improvement_local_search(objective_function, solution, p):
-    # Função para realizar a busca local de melhoramento
     current_solution = copy.deepcopy(solution)
     improved = True
 
-    # Loop até que não haja mais melhorias na solução
     while improved:
         improved = False
-        # Sacudir a solução e aplicar a função objetivo
-        new_solution = shake(current_solution, 2, p)
-        new_solution = objective_function(new_solution, p)
-        
-        # Se a nova solução for melhor, atualizar a solução atual
-        if new_solution.penalized_fitness < current_solution.penalized_fitness:
-            current_solution = new_solution
-            improved = True
+
+        for _ in range(3):
+            new_solution = shake(current_solution, 2, p)
+            new_solution = objective_function(new_solution, p)
+            
+            if new_solution.penalized_fitness < current_solution.penalized_fitness:
+                current_solution = new_solution
+                improved = True
 
     return current_solution
 
@@ -290,6 +288,7 @@ def taskMove_Equipe(solution, p):
 
 def shake(solution, k, p):
     new_solution = copy.deepcopy(solution)
+
     if k == 1:
         return taskMove_Equipe(new_solution, p)
     elif k == 2:
