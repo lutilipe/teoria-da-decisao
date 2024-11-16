@@ -6,6 +6,9 @@ import multiprocessing
 import matplotlib.pyplot as plt
 import copy
 from concurrent.futures import as_completed
+from sklearn.cluster import KMeans
+from itertools import combinations
+import random
 
 """ 
 n = ativo
@@ -55,7 +58,7 @@ def probdef():
     return probdata
 
 def penalizacao_restricoes(solution, p):
-    P = 10
+    P = 20
     X, Y, H = solution.x, solution.y, solution.h
 
     # Restrição 1: Cada equipe deve ser alocada a uma única base de manutenção
@@ -103,16 +106,14 @@ def f2(solution, p):
     return solution
 
 def heuristica_construtiva(X, Y, H, p):
-    n_bases = len(p.m)
     n_ativos = len(p.n)
     s_equipes = len(p.s)
     min_ativos_por_equipe = max(1, int(0.2 * n_ativos / s_equipes))
 
-    bases_selecionadas = []
-    for equipe in p.s:
-        base = p.m[equipe % n_bases]
+    bases_selecionadas = random.sample(p.m, 3)
+    for idx, equipe in enumerate(p.s):
+        base = bases_selecionadas[idx]
         Y.loc[base, equipe] = 1
-        bases_selecionadas.append(base)
 
     for ativo in p.n:
         base_mais_proxima = min(
@@ -129,21 +130,71 @@ def heuristica_construtiva(X, Y, H, p):
     for base in bases_selecionadas:
         ativos_na_base = X.loc[:, base].sum()
         while ativos_na_base < min_ativos_por_equipe:
-            for outra_base in bases_selecionadas:
-                if X.loc[:, outra_base].sum() > min_ativos_por_equipe:
-                    ativo_realocado = X.loc[:, outra_base].idxmax()
-                    X.loc[ativo_realocado, outra_base] = 0
-                    X.loc[ativo_realocado, base] = 1
-                    for equipe in p.s:
-                        if Y.loc[base, equipe] == 1:
-                            H.loc[ativo_realocado, equipe] = 1
-                            break
-                    ativos_na_base += 1
-                    break
+            # Fix
+            outra_base = max(
+                [curr_base for curr_base in bases_selecionadas if curr_base != base],
+                key=lambda curr_base: X.loc[:, curr_base].sum()
+            )
+            if X.loc[:, outra_base].sum() > min_ativos_por_equipe:
+                ativos_outra_base = X.loc[:, outra_base][X.loc[:, outra_base] == 1].index
+                ativo_realocado = min(ativos_outra_base, key=lambda ativo: p.d.loc[(ativo, base)])
+                X.loc[ativo_realocado, outra_base] = 0
+                X.loc[ativo_realocado, base] = 1
+                for equipe in p.s:
+                    if Y.loc[base, equipe] == 1:
+                        H.loc[ativo_realocado, equipe] = 1
+                    else:
+                        H.loc[ativo_realocado, equipe] = 0
+                ativos_na_base += 1
+                break
 
-def initialize_solution(p):
     solution = Struct()
+    solution.x, solution.y, solution.h = X, Y, H
+    return solution
 
+def heuristica_construtiva2(X, Y, H, p, objective_function):
+    base_combinations = list(combinations(p.m, 3))
+
+    best_start_solution = None
+
+    for combination in base_combinations:
+        kmeans = KMeans(n_clusters=len(combination), init=combination, n_init=1)
+        kmeans.fit(p.n)
+        
+        labels = kmeans.labels_
+
+        solution = Struct()
+
+        solution.x, solution.y, solution.h = copy.copy(X), copy.copy(Y), copy.copy(H),
+
+        for equipe in p.s:
+            base = combination[equipe % len(combination)]
+            solution.y.loc[base, equipe] = 1
+
+        assets_per_team = { team: 0 for team in p.s }
+
+        for idx, label in enumerate(labels):
+            base = combination[label]
+            ativo = p.n[idx]
+            solution.x.loc[ativo, base] = 1
+
+            teams_at_base = []
+
+            for equipe in p.s:
+                if solution.y.loc[base, equipe] == 1:
+                    teams_at_base.append(equipe)
+
+            min_team = min(teams_at_base, key=lambda team: assets_per_team[team])
+            solution.h.loc[ativo, min_team] = 1
+            assets_per_team[min_team] += 1
+
+        solution = objective_function(solution, p)
+        if best_start_solution == None or solution.penalized_fitness < best_start_solution.penalized_fitness:
+            best_start_solution = solution
+    
+    return best_start_solution
+
+def initialize_solution(p, objective_function):
     X = pd.DataFrame(0, 
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=pd.MultiIndex.from_tuples(p.m))
@@ -154,9 +205,9 @@ def initialize_solution(p):
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=p.s)
 
-    heuristica_construtiva(X,Y,H,p)
+    solution = heuristica_construtiva(X,Y,H,p)
+    #solution = heuristica_construtiva2(X,Y,H,p,objective_function)
 
-    solution.x, solution.y, solution.h = X, Y, H
     return solution
 
 def neighborhood_change(current_solution, new_solution, k):
@@ -167,17 +218,17 @@ def neighborhood_change(current_solution, new_solution, k):
 def best_improvement_local_search(objective_function, solution, p):
     current_solution = copy.deepcopy(solution)
     improved = True
-
     while improved:
         improved = False
-
-        for _ in range(3):
-            new_solution = shake(current_solution, 2, p)
-            new_solution = objective_function(new_solution, p)
-            
+        for ativo in p.n:
+            new_solution1 = objective_function(taskMove_Ativo(copy.deepcopy(current_solution), p), p)
+            new_solution2 = objective_function(swap_Ativo_Base(copy.deepcopy(current_solution), p), p)
+            new_solution = new_solution1 if new_solution1.penalized_fitness < new_solution2.penalized_fitness else new_solution2
             if new_solution.penalized_fitness < current_solution.penalized_fitness:
-                current_solution = new_solution
+                print("LOCAL IMPROVED", current_solution.penalized_fitness, new_solution.penalized_fitness)
+                current_solution = copy.deepcopy(new_solution)
                 improved = True
+                break
 
     return current_solution
 
@@ -190,10 +241,10 @@ def ativos_por_base(base, X):
 
 def bases_com_equipes(Y):
     bases = list()
-    for j in p.m:
-        for k in p.s:
-            if Y.loc[j, k] == 1:
-                bases.append(j)
+    for base in p.m:
+        if Y.loc[base, :].sum() >= 1:
+            bases.append(base)
+            
     return bases
 
 def swap_Ativo_Base(solution, p):
@@ -202,14 +253,14 @@ def swap_Ativo_Base(solution, p):
 
     bases_ativas = bases_com_equipes(solution.y)
 
-    base1 = bases_ativas[np.random.randint(0, len(bases_ativas))]
+    base1 = random.choice(bases_ativas)
     ativos1 = ativos_por_base(base1, solution.x)
-    ativo1 = ativos1[np.random.randint(0, len(ativos1))]
-
+    ativo1 = random.choice(ativos1)
     bases_ativas.remove(base1)
-    base2 = bases_ativas[np.random.randint(0, len(bases_ativas))]
+
+    base2 = random.choice(bases_ativas)
     ativos2 = ativos_por_base(base2, solution.x)
-    ativo2 = ativos2[np.random.randint(0, len(ativos2))]
+    ativo2 = random.choice(ativos2)
 
     solution.x.loc[ativo1, base1] = 0
     solution.x.loc[ativo2, base2] = 0
@@ -219,8 +270,12 @@ def swap_Ativo_Base(solution, p):
     for k in p.s:
         if solution.h.loc[ativo1, k] == 1:
             equipe1 = k
+            break
+
+    for k in p.s:
         if solution.h.loc[ativo2, k] == 1:
             equipe2 = k
+            break
 
     solution.h.loc[ativo1, equipe1] = 0
     solution.h.loc[ativo2, equipe2] = 0
@@ -230,10 +285,9 @@ def swap_Ativo_Base(solution, p):
     return solution
 
 def taskMove_Ativo(solution, p):
-    # Movimentação de uma tarefa de uma máquina de origem para uma outra máquina.
     # Um único ativo é movido de sua base atual para uma nova base sem uma troca direta com outro ativo. Não é uma troca, aqui todos os ativos seguintes à nova posição serão modificados também
 
-    ativo = p.n[np.random.randint(0, len(p.n))]
+    ativo = random.choice(p.n)
 
     bases_ativas = bases_com_equipes(solution.y)
 
@@ -243,7 +297,7 @@ def taskMove_Ativo(solution, p):
             break
 
     bases_ativas.remove(base_atual)
-    base_nova = bases_ativas[np.random.randint(0, len(bases_ativas))]
+    base_nova = random.choice(bases_ativas)
 
     equipes = copy.deepcopy(p.s)
 
@@ -269,37 +323,69 @@ def taskMove_Equipe(solution, p):
     equipe = np.random.choice(p.s)
     bases_disponiveis = copy.deepcopy(p.m)
 
-    for j in bases_disponiveis:
-        if solution.y.loc[j, equipe] == 1:
-            base_atual = j
-            bases_disponiveis.remove(j)
+    for base in bases_disponiveis:
+        if solution.y.loc[base, equipe] == 1:
+            base_atual = base
+            bases_disponiveis.remove(base)
             break
-    base_nova = bases_disponiveis[np.random.randint(0, len(bases_disponiveis))]
+
+    for base in bases_disponiveis:
+        if solution.y.loc[base, :].sum() > 0:
+            bases_disponiveis.remove(base)
+
+    base_nova = random.choice(bases_disponiveis)
     solution.y.loc[base_atual, equipe] = 0
     solution.y.loc[base_nova, equipe] = 1
 
-    for i in p.n:
-        if solution.x.loc[i, base_atual] == 1:
-            solution.x.loc[i, base_atual] = 0
-        if solution.x.loc[i, base_nova] == 0:
-            solution.x.loc[i, base_nova] = 1
+    for ativo in p.n:
+        if solution.x.loc[ativo, base_atual] == 1:
+            solution.x.loc[ativo, base_atual] = 0
+            solution.x.loc[ativo, base_nova] = 1
+
+    return solution
+
+def taskMove_Equipe2(solution, p, k):
+    # Realocação de uma equipe inteira de uma base para outra, mantendo seus ativos.
+
+    bases_disponiveis = copy.deepcopy(p.m)
+
+    bases_atuais = []
+    for base in p.m:
+        row = solution.y.loc[base, :]
+        if row.sum() > 0:
+            for team, is_allocated in row.items():
+                if is_allocated == 1:
+                    bases_atuais.append((base, team))
+            bases_disponiveis.remove(base)
+
+    random.shuffle(bases_atuais)
+    random.shuffle(bases_disponiveis)
+
+    selected_bases = random.sample(bases_atuais, k)
+    bases_to_change = random.sample(bases_disponiveis, k)
+
+    for idx in range(k):
+        base_nova = bases_to_change[idx]
+        base_atual = selected_bases[idx][0]
+        equipe_atual = selected_bases[idx][1]
+        solution.y.loc[base_atual, equipe_atual] = 0
+        solution.y.loc[base_nova, equipe_atual] = 1
+
+        for ativo in p.n:
+            if solution.x.loc[ativo, base_atual] == 1:
+                solution.x.loc[ativo, base_atual] = 0
+                solution.x.loc[ativo, base_nova] = 1
 
     return solution
 
 def shake(solution, k, p):
     new_solution = copy.deepcopy(solution)
-
-    if k == 1:
-        return taskMove_Equipe(new_solution, p)
-    elif k == 2:
-        return taskMove_Ativo(new_solution, p)
-    elif k == 3:
-        return swap_Ativo_Base(new_solution, p)
+    return taskMove_Equipe2(new_solution, p, k)
 
 def GVNS(objective_function, p):
-    initial_solution = initialize_solution(p)
+    initial_solution = initialize_solution(p, objective_function)
 
-    max_num_evaluations = 30
+    max_num_evaluations = 100
     num_evaluations = 0
     k_max = 3
     
@@ -320,11 +406,12 @@ def GVNS(objective_function, p):
             new_solution = objective_function(new_solution, p)
             
             num_evaluations += 1
-
+            old_fit = current_solution.penalized_fitness
+            print(old_fit, new_solution.penalized_fitness)
             current_solution, k = neighborhood_change(current_solution, new_solution, k)
+            if old_fit > new_solution.penalized_fitness:
+                print("MELHOROU")
 
-            history.fitness.append(current_solution.fitness)
-            history.penalty.append(current_solution.penalty)
             history.penalized_fitness.append(current_solution.penalized_fitness)
 
     return current_solution, history
@@ -337,11 +424,12 @@ def optimize_instance(objective_function, p, seed):
 def optimize(p, objective_function):
     results = []
 
-    num_instances = 5 
+    num_instances = 1
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         futures = [executor.submit(optimize_instance, objective_function, copy.deepcopy(p), seed=np.random.randint(0, 10000)) for _ in range(num_instances)]
         for future in as_completed(futures):
+            print("COMPLETED")
             result = future.result()
             results.append(result)
     return results
@@ -456,17 +544,19 @@ std_dev_f1, max_sol_f1, min_sol_f1 = get_metrics(results_f1)
 print(f"Desvio Padrao - f1: {std_dev_f1}")
 print(f"Máximo - f1: {max_sol_f1.penalized_fitness}")
 print(f"Mínimo - f1: {min_sol_f1.penalized_fitness}")
+print(f"Mínimo - f1: {min_sol_f1.penalty}")
 
 plot_convergence(results_f1, "f1")
 visualize_network(p, min_sol_f1, "f1")
 
-# F2
+""" # F2
 results_f2 = optimize(p, f2)
 std_dev_f2, max_sol_f2, min_sol_f2 = get_metrics(results_f2)
 
 print(f"Desvio Padrao - f2: {std_dev_f2}")
 print(f"Máximo - f2: {max_sol_f2.penalized_fitness}")
 print(f"Mínimo - f2: {min_sol_f2.penalized_fitness}")
+print(f"Mínimo - f1: {min_sol_f2.penalty}")
 
 plot_convergence(results_f2, "f2")
-visualize_network(p, min_sol_f2, "f2")
+visualize_network(p, min_sol_f2, "f2") """
