@@ -62,20 +62,20 @@ def penalizacao_restricoes(solution, p):
     X, Y, H = solution.x, solution.y, solution.h
 
     # Restrição 1: Cada equipe deve ser alocada a uma única base de manutenção
-    penalidade = np.abs(Y.sum(axis=0) - 1).sum() * P
+    penalidade = np.maximum(np.abs(Y.sum(axis=0) - 1).sum(), 0) * P
 
     # Restrição 2: Cada ativo deve ser atribuído a exatamente uma base
-    penalidade += np.abs(X.sum(axis=1) - 1).sum() * P
+    penalidade += np.maximum(np.abs(X.sum(axis=1) - 1).sum(), 0) * P
 
     # Restrição 3: Ativo só pode ser atribuído a uma base com equipe alocada
     penalidade += P * ((X.values @ (Y.sum(axis=1) < 1).values).sum())
 
     # Restrição 4: Cada ativo deve ser atribuído a exatamente uma equipe
-    penalidade += np.abs(H.sum(axis=1) - 1).sum() * P
+    penalidade += np.maximum(np.abs(H.sum(axis=1) - 1).sum(), 0) * P
 
     # Restrição 5: Ativo só pode ser atribuído a equipe que está na mesma base
     for i, j in np.argwhere(X.values):
-        penalidade += P * ((H.loc[p.n[i]] * (1 - Y.loc[p.m[j]])).sum())
+        penalidade += P * np.maximum(((H.loc[p.n[i]] * (1 - Y.loc[p.m[j]])).sum()), 0)
 
     # Restrição 6: Cada equipe deve ser responsável por pelo menos η ativos
     penalidade += np.maximum(0, (p.eta * len(p.n) / len(p.s) - H.sum(axis=0))).sum() * P
@@ -105,57 +105,13 @@ def f2(solution, p):
             
     return solution
 
-def heuristica_construtiva(X, Y, H, p):
-    n_ativos = len(p.n)
-    s_equipes = len(p.s)
-    min_ativos_por_equipe = max(1, int(0.2 * n_ativos / s_equipes))
+def heuristica_construtiva(X, Y, H, p, objective_function):
+    from itertools import combinations
+    import copy
+    from sklearn.cluster import KMeans
 
-    bases_selecionadas = random.sample(p.m, 3)
-    for idx, equipe in enumerate(p.s):
-        base = bases_selecionadas[idx]
-        Y.loc[base, equipe] = 1
-
-    for ativo in p.n:
-        base_mais_proxima = min(
-            bases_selecionadas,
-            key=lambda base: p.d.loc[ativo, base] if Y.loc[base].sum() > 0 else float('inf')
-        )
-        X.loc[ativo, base_mais_proxima] = 1
-
-        for equipe in p.s:
-            if Y.loc[base_mais_proxima, equipe] == 1:
-                H.loc[ativo, equipe] = 1
-                break
-
-    for base in bases_selecionadas:
-        ativos_na_base = X.loc[:, base].sum()
-        while ativos_na_base < min_ativos_por_equipe:
-            # Fix
-            outra_base = max(
-                [curr_base for curr_base in bases_selecionadas if curr_base != base],
-                key=lambda curr_base: X.loc[:, curr_base].sum()
-            )
-            if X.loc[:, outra_base].sum() > min_ativos_por_equipe:
-                ativos_outra_base = X.loc[:, outra_base][X.loc[:, outra_base] == 1].index
-                ativo_realocado = min(ativos_outra_base, key=lambda ativo: p.d.loc[(ativo, base)])
-                X.loc[ativo_realocado, outra_base] = 0
-                X.loc[ativo_realocado, base] = 1
-                for equipe in p.s:
-                    if Y.loc[base, equipe] == 1:
-                        H.loc[ativo_realocado, equipe] = 1
-                    else:
-                        H.loc[ativo_realocado, equipe] = 0
-                ativos_na_base += 1
-                break
-
-    solution = Struct()
-    solution.x, solution.y, solution.h = X, Y, H
-    return solution
-
-def heuristica_construtiva2(X, Y, H, p, objective_function):
     base_combinations = list(combinations(p.m, 3))
-
-    best_start_solution = None
+    solutions = []
 
     for combination in base_combinations:
         kmeans = KMeans(n_clusters=len(combination), init=combination, n_init=1)
@@ -165,7 +121,7 @@ def heuristica_construtiva2(X, Y, H, p, objective_function):
 
         solution = Struct()
 
-        solution.x, solution.y, solution.h = copy.copy(X), copy.copy(Y), copy.copy(H),
+        solution.x, solution.y, solution.h = copy.copy(X), copy.copy(Y), copy.copy(H)
 
         for equipe in p.s:
             base = combination[equipe % len(combination)]
@@ -189,12 +145,13 @@ def heuristica_construtiva2(X, Y, H, p, objective_function):
             assets_per_team[min_team] += 1
 
         solution = objective_function(solution, p)
-        if best_start_solution == None or solution.penalized_fitness < best_start_solution.penalized_fitness:
-            best_start_solution = solution
-    
-    return best_start_solution
+        solutions.append(solution)
 
-def initialize_solution(p, objective_function):
+    solutions.sort(key=lambda sol: sol.penalized_fitness)
+
+    return solutions
+
+def initialize_solutions(p, objective_function):
     X = pd.DataFrame(0, 
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=pd.MultiIndex.from_tuples(p.m))
@@ -205,17 +162,16 @@ def initialize_solution(p, objective_function):
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=p.s)
 
-    solution = heuristica_construtiva(X,Y,H,p)
-    #solution = heuristica_construtiva2(X,Y,H,p,objective_function)
+    solutions = heuristica_construtiva(X,Y,H,p,objective_function)
 
-    return solution
+    return solutions
 
 def neighborhood_change(current_solution, new_solution, k):
     if new_solution.penalized_fitness < current_solution.penalized_fitness:
         return new_solution, 1
     return current_solution, k + 1
 
-def best_improvement_local_search(objective_function, solution, p):
+def local_search(objective_function, solution, p):
     current_solution = copy.deepcopy(solution)
     improved = True
     while improved:
@@ -316,35 +272,7 @@ def taskMove_Ativo(solution, p):
 
     return solution
 
-def taskMove_Equipe(solution, p):
-    # Movimentação de uma tarefa de uma máquina de origem para uma outra máquina.
-    # Realocação de uma equipe inteira de uma base para outra, mantendo seus ativos.
-
-    equipe = np.random.choice(p.s)
-    bases_disponiveis = copy.deepcopy(p.m)
-
-    for base in bases_disponiveis:
-        if solution.y.loc[base, equipe] == 1:
-            base_atual = base
-            bases_disponiveis.remove(base)
-            break
-
-    for base in bases_disponiveis:
-        if solution.y.loc[base, :].sum() > 0:
-            bases_disponiveis.remove(base)
-
-    base_nova = random.choice(bases_disponiveis)
-    solution.y.loc[base_atual, equipe] = 0
-    solution.y.loc[base_nova, equipe] = 1
-
-    for ativo in p.n:
-        if solution.x.loc[ativo, base_atual] == 1:
-            solution.x.loc[ativo, base_atual] = 0
-            solution.x.loc[ativo, base_nova] = 1
-
-    return solution
-
-def taskMove_Equipe2(solution, p, k):
+def task_move_team(solution, p, k):
     # Realocação de uma equipe inteira de uma base para outra, mantendo seus ativos.
 
     bases_disponiveis = copy.deepcopy(p.m)
@@ -380,12 +308,10 @@ def taskMove_Equipe2(solution, p, k):
 
 def shake(solution, k, p):
     new_solution = copy.deepcopy(solution)
-    return taskMove_Equipe2(new_solution, p, k)
+    return task_move_team(new_solution, p, k)
 
-def GVNS(objective_function, p):
-    initial_solution = initialize_solution(p, objective_function)
-
-    max_num_evaluations = 100
+def GVNS(objective_function, initial_solution, p):
+    max_num_evaluations = 1000
     num_evaluations = 0
     k_max = 3
     
@@ -402,12 +328,12 @@ def GVNS(objective_function, p):
         k = 1
         while k <= k_max:
             new_solution = shake(current_solution, k, p)
-            new_solution = best_improvement_local_search(objective_function, new_solution, p)
+            new_solution = local_search(objective_function, new_solution, p)
             new_solution = objective_function(new_solution, p)
             
             num_evaluations += 1
             old_fit = current_solution.penalized_fitness
-            print(old_fit, new_solution.penalized_fitness)
+            print(old_fit, new_solution.penalized_fitness, num_evaluations)
             current_solution, k = neighborhood_change(current_solution, new_solution, k)
             if old_fit > new_solution.penalized_fitness:
                 print("MELHOROU")
@@ -416,22 +342,48 @@ def GVNS(objective_function, p):
 
     return current_solution, history
 
-def optimize_instance(objective_function, p, seed):
+def optimize_instance(objective_function, p, initial_solution, seed):
     np.random.seed(seed)
-    best_solution, history = GVNS(objective_function, p)
+    best_solution, history = GVNS(objective_function, initial_solution, p)
     return best_solution, history
+
+def select_best_and_random(solutions, top_n=36, random_pick=5):
+    top_solutions = solutions[:top_n]
+    random_solutions = random.sample(top_solutions, random_pick)
+
+    return random_solutions
 
 def optimize(p, objective_function):
     results = []
 
-    num_instances = 1
+    num_instances = 5
+    percentage_of_solutions_to_pick = 0.2
+
+    solutions = initialize_solutions(p, objective_function)
+
+    initial_solutions = select_best_and_random(
+        solutions=solutions,
+        top_n=int(np.ceil(len(solutions) * percentage_of_solutions_to_pick)),
+        random_pick=num_instances
+    )
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-        futures = [executor.submit(optimize_instance, objective_function, copy.deepcopy(p), seed=np.random.randint(0, 10000)) for _ in range(num_instances)]
+        futures = [
+            executor.submit(
+                optimize_instance,
+                objective_function,
+                copy.deepcopy(p),
+                initial_solutions[i],
+                seed=np.random.randint(0, 10000)
+            )
+            for i in range(num_instances)
+        ]
+
         for future in as_completed(futures):
             print("COMPLETED")
             result = future.result()
             results.append(result)
+
     return results
 
 def get_metrics(results):
@@ -549,7 +501,7 @@ print(f"Mínimo - f1: {min_sol_f1.penalty}")
 plot_convergence(results_f1, "f1")
 visualize_network(p, min_sol_f1, "f1")
 
-""" # F2
+# F2
 results_f2 = optimize(p, f2)
 std_dev_f2, max_sol_f2, min_sol_f2 = get_metrics(results_f2)
 
@@ -559,4 +511,4 @@ print(f"Mínimo - f2: {min_sol_f2.penalized_fitness}")
 print(f"Mínimo - f1: {min_sol_f2.penalty}")
 
 plot_convergence(results_f2, "f2")
-visualize_network(p, min_sol_f2, "f2") """
+visualize_network(p, min_sol_f2, "f2")
