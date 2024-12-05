@@ -92,12 +92,7 @@ def f1(solution, p):
     return solution
 
 def f2(solution, p):
-    assets_maintained_by_teams = solution.h.sum(axis=0)
-    
-    max_assets_maintained = assets_maintained_by_teams.max()
-    min_assets_maintained = assets_maintained_by_teams.min()
-
-    result = max_assets_maintained - min_assets_maintained
+    result = (p.d.values * solution.x.values).max()
 
     solution.fitness = result
     solution.penalty = penalizacao_restricoes(solution, p)
@@ -106,10 +101,6 @@ def f2(solution, p):
     return solution
 
 def heuristica_construtiva(X, Y, H, p, objective_function):
-    from itertools import combinations
-    import copy
-    from sklearn.cluster import KMeans
-
     base_combinations = list(combinations(p.m, 3))
     solutions = []
 
@@ -188,34 +179,25 @@ def local_search(objective_function, solution, p):
 
     return current_solution
 
-def ativos_por_base(base, X):
-    ativos = list()
-    for i in p.n:
-        if X.loc[i, base] == 1:
-            ativos.append(i)
-    return ativos
+def assets_per_base(base, X):
+    return X.index[X[base] == 1].tolist()
 
-def bases_com_equipes(Y):
-    bases = list()
-    for base in p.m:
-        if Y.loc[base, :].sum() >= 1:
-            bases.append(base)
-            
-    return bases
+def bases_with_teams(Y):
+    return Y.index[Y.sum(axis=1) >= 1].tolist()
 
 def swap_Ativo_Base(solution, p):
     # Realocação de duas tarefas aleatórias entre duas máquinas.
     # Selecionar dois ativos aleatórios que estão alocados a bases diferentes e trocar suas alocações.
 
-    bases_ativas = bases_com_equipes(solution.y)
+    bases_ativas = bases_with_teams(solution.y)
 
     base1 = random.choice(bases_ativas)
-    ativos1 = ativos_por_base(base1, solution.x)
+    ativos1 = assets_per_base(base1, solution.x)
     ativo1 = random.choice(ativos1)
     bases_ativas.remove(base1)
 
     base2 = random.choice(bases_ativas)
-    ativos2 = ativos_por_base(base2, solution.x)
+    ativos2 = assets_per_base(base2, solution.x)
     ativo2 = random.choice(ativos2)
 
     solution.x.loc[ativo1, base1] = 0
@@ -245,7 +227,7 @@ def taskMove_Ativo(solution, p):
 
     ativo = random.choice(p.n)
 
-    bases_ativas = bases_com_equipes(solution.y)
+    bases_ativas = bases_with_teams(solution.y)
 
     for j in bases_ativas:
         if solution.x.loc[ativo, j] == 1:
