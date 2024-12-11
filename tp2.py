@@ -1,3 +1,4 @@
+from enum import Enum
 import numpy as np
 import pandas as pd
 import statistics
@@ -37,6 +38,14 @@ def parse_dist(df, p):
     
     return distance_matrix
 
+def parse_failure(df, p):
+    failure_map = {}
+    for ativo in p.n:
+        filtered_df = df[(df['lat_b'] == ativo[0]) & (df['lon_b'] == ativo[1])]
+        failure_map[ativo] = filtered_df['failure'].tolist()[0]
+    
+    return pd.Series(failure_map)
+
 def convert_to_float(value):
     return float(value.replace(",", "."))
 
@@ -48,11 +57,17 @@ def probdef():
     df['lon_a'] = df['lon_a'].apply(convert_to_float)
     df['distance'] = df['distance'].apply(convert_to_float)
 
+    df_ativos = pd.read_csv('probfalhaativos.csv', names=['lat_b', 'lon_b', 'failure'], sep=';')
+    df_ativos['lat_b'] = df_ativos['lat_b'].apply(convert_to_float)
+    df_ativos['lon_b'] = df_ativos['lon_b'].apply(convert_to_float)
+    df_ativos['failure'] = df_ativos['failure'].apply(convert_to_float)
+
     probdata = Struct()
     probdata.s = [1, 2, 3] # 3
     probdata.n = parse_ativos(df)
     probdata.m = parse_base(df)
     probdata.d = parse_dist(df, probdata)
+    probdata.p = parse_failure(df_ativos, probdata)
     probdata.eta = 0.2
 
     return probdata
@@ -92,7 +107,7 @@ def f1(solution, p):
     return solution
 
 def f2(solution, p):
-    result = (p.d.values * solution.x.values).max()
+    result = (p.p.values[:, None] * solution.x.values * p.d.values).sum()
 
     solution.fitness = result
     solution.penalty = penalizacao_restricoes(solution, p)
@@ -167,7 +182,7 @@ def local_search(objective_function, solution, p):
     improved = True
     while improved:
         improved = False
-        for ativo in p.n:
+        for ativo in range(3):
             new_solution1 = objective_function(taskMove_Ativo(copy.deepcopy(current_solution), p), p)
             new_solution2 = objective_function(swap_Ativo_Base(copy.deepcopy(current_solution), p), p)
             new_solution = new_solution1 if new_solution1.penalized_fitness < new_solution2.penalized_fitness else new_solution2
@@ -293,7 +308,7 @@ def shake(solution, k, p):
     return task_move_team(new_solution, p, k)
 
 def GVNS(objective_function, initial_solution, p):
-    max_num_evaluations = 1000
+    max_num_evaluations = 20
     num_evaluations = 0
     k_max = 3
     
@@ -324,10 +339,39 @@ def GVNS(objective_function, initial_solution, p):
 
     return current_solution, history
 
-def optimize_instance(objective_function, p, initial_solution, seed):
+def optimize_instance(objective_function, method, p, initial_solutions, seed):
     np.random.seed(seed)
-    best_solution, history = GVNS(objective_function, initial_solution, p)
-    return best_solution, history
+
+    N = 10
+
+    approachinfo = []
+
+    if method == Method.Sum:
+        for _ in np.arange(N):
+        
+            w = np.random.random(size=2)
+            w = w/sum(w)
+
+            initial_solution = random.sample(initial_solutions, 1)[0]
+
+            def fn(solution, p):
+                return objective_function(solution, p, w)
+            
+            best_solution, history = GVNS(fn, initial_solution, p)
+            approachinfo.append(best_solution)
+
+    elif method == Method.Epsilon:
+        for _ in np.arange(N):
+        
+            w = np.random.random(size=2)
+            w = w/sum(w)
+
+            def fn(solution, p):
+                return objective_function(solution, p, w)
+            
+            best_solution, history = GVNS(fn, initial_solution, p)
+
+    return approachinfo
 
 def select_best_and_random(solutions, top_n=36, random_pick=5):
     top_solutions = solutions[:top_n]
@@ -335,11 +379,15 @@ def select_best_and_random(solutions, top_n=36, random_pick=5):
 
     return random_solutions
 
-def optimize(p, objective_function):
+class Method(Enum):
+    Sum = 1
+    Epsilon = 2
+
+def optimize(p, objective_function, method: Method):
     results = []
 
     num_instances = 5
-    percentage_of_solutions_to_pick = 0.2
+    percentage_of_solutions_to_pick = 0.3
 
     solutions = initialize_solutions(p, objective_function)
 
@@ -354,11 +402,12 @@ def optimize(p, objective_function):
             executor.submit(
                 optimize_instance,
                 objective_function,
+                method,
                 copy.deepcopy(p),
-                initial_solutions[i],
+                copy.deepcopy(initial_solutions),
                 seed=np.random.randint(0, 10000)
             )
-            for i in range(num_instances)
+            for _ in range(num_instances)
         ]
 
         for future in as_completed(futures):
@@ -469,28 +518,83 @@ def visualize_network(p, solution, fobj):
 
     plt.savefig(f"network_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
 
+def dominates(sol_a, sol_b):
+    return (sol_a.f1_fitness <= sol_b.f1_fitness and sol_a.f2_fitness <= sol_b.f2_fitness) and (
+        sol_a.f1_fitness < sol_b.f1_fitness or sol_a.f2_fitness < sol_b.f2_fitness)
+
+def get_non_dominated_solutions(solutions):
+    non_dominated = []
+    for i, sol_i in enumerate(solutions):
+        dominated = False
+        for j, sol_j in enumerate(solutions):
+            if j != i and dominates(sol_j, sol_i):
+                dominated = True
+                break
+        if not dominated:
+            non_dominated.append(sol_i)
+    return non_dominated
+
+def weighted_sum(solution, p, weights = [0.5, 0.5]):
+    solution_f1 = f1(copy.deepcopy(solution), p)
+    solution_f2 = f2(copy.deepcopy(solution), p)
+    solution.penalized_fitness = weights[0] * solution_f1.penalized_fitness + weights[1] * solution_f2.penalized_fitness
+    solution.f1_fitness = solution_f1.penalized_fitness
+    solution.f2_fitness = solution_f2.penalized_fitness
+    return solution
+
+def epsilon_constraint(solution, p, epsilon = np.inf):
+    solution_f1 = f1(copy.deepcopy(solution), p)
+    solution_f2 = f2(copy.deepcopy(solution), p)
+    solution.penalized_fitness = solution_f1.penalized_fitness + np.max(0, solution_f2.penalized_fitness - epsilon)
+    solution.f1_fitness = solution_f1.penalized_fitness
+    solution.f2_fitness = solution_f2.penalized_fitness
+    return solution
+
+def plot_pareto_frontier(results, fobj):
+    plt.figure(figsize=(10,8))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(results)))
+
+    for idx, result in enumerate(results):
+        f1_values = [sol.f1_fitness for sol in result]
+        f2_values = [sol.f2_fitness for sol in result]
+        plt.scatter(f1_values, f2_values, color=colors[idx], label=f"Teste {idx+1}")
+
+
+    plt.legend(scatterpoints=1, markerscale=1, loc='upper left', 
+            bbox_to_anchor=(1.05, 1), frameon=True, fancybox=True, shadow=True, 
+            borderpad=1.2, fontsize=10)
+    plt.title('Soluções estimadas')
+    plt.xlabel('f1(x)')
+    plt.ylabel('f2(x)')
+    plt.savefig(f"pareto_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
+
 p = probdef()
+# PW
+results_pw = optimize(p, weighted_sum, Method.Sum)
+plot_pareto_frontier(results_pw, "PW")
+""" std_dev_pw, max_sol_pw, min_sol_pw = get_metrics(results_pw)
 
-# F1
-results_f1 = optimize(p, f1)
-std_dev_f1, max_sol_f1, min_sol_f1 = get_metrics(results_f1)
+print(f"Desvio Padrao - PW: {std_dev_pw}")
+print(f"Máximo - PW: {max_sol_pw.penalized_fitness}")
+print(f"Mínimo - PW: {min_sol_pw.penalized_fitness}")
+print(f"Mínimo - PW: {min_sol_pw.penalty}")
+print(f"Fitness - F1: {min_sol_pw.fitness_f1}")
+print(f"Fitness - F2: {min_sol_pw.fitness_f2}") """
 
-print(f"Desvio Padrao - f1: {std_dev_f1}")
-print(f"Máximo - f1: {max_sol_f1.penalized_fitness}")
-print(f"Mínimo - f1: {min_sol_f1.penalized_fitness}")
-print(f"Mínimo - f1: {min_sol_f1.penalty}")
+""" plot_convergence(results_pw, "PW")
+visualize_network(p, min_sol_pw, "PW") """
 
-plot_convergence(results_f1, "f1")
-visualize_network(p, min_sol_f1, "f1")
+""" # PE
+results_pe = optimize(p, epsilon_constraint, Method.Epsilon)
+std_dev_pe, max_sol_pe, min_sol_pe = get_metrics(results_pe)
 
-# F2
-results_f2 = optimize(p, f2)
-std_dev_f2, max_sol_f2, min_sol_f2 = get_metrics(results_f2)
+print(f"Desvio Padrao - PE: {std_dev_pe}")
+print(f"Máximo - PE: {max_sol_pe.penalized_fitness}")
+print(f"Mínimo - PE: {min_sol_pe.penalized_fitness}")
+print(f"Mínimo - PE: {min_sol_pe.penalty}")
+print(f"Fitness - F1: {min_sol_pe.fitness_f1}")
+print(f"Fitness - F2: {min_sol_pe.fitness_f2}")
 
-print(f"Desvio Padrao - f2: {std_dev_f2}")
-print(f"Máximo - f2: {max_sol_f2.penalized_fitness}")
-print(f"Mínimo - f2: {min_sol_f2.penalized_fitness}")
-print(f"Mínimo - f1: {min_sol_f2.penalty}")
-
-plot_convergence(results_f2, "f2")
-visualize_network(p, min_sol_f2, "f2")
+plot_convergence(results_pe, "PE")
+visualize_network(p, min_sol_pe, "PE")
+ """
