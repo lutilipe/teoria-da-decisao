@@ -115,7 +115,7 @@ def f2(solution, p):
             
     return solution
 
-def heuristica_construtiva(X, Y, H, p, objective_function):
+def heuristica_construtiva(X, Y, H, p, objective_function, approachinfo):
     base_combinations = list(combinations(p.m, 3))
     solutions = []
 
@@ -151,6 +151,11 @@ def heuristica_construtiva(X, Y, H, p, objective_function):
             assets_per_team[min_team] += 1
 
         solution = objective_function(solution, p)
+
+        if hasattr(solution, "f2_fitness"):
+            approachinfo.epsilon_max_value = max(approachinfo.epsilon_max_value, solution.f2_fitness)
+            approachinfo.epsilon_min_value = min(approachinfo.epsilon_min_value, solution.f2_fitness)
+
         solutions.append(solution)
 
     solutions.sort(key=lambda sol: sol.penalized_fitness)
@@ -168,9 +173,13 @@ def initialize_solutions(p, objective_function):
                     index=pd.MultiIndex.from_tuples(p.n), 
                     columns=p.s)
 
-    solutions = heuristica_construtiva(X,Y,H,p,objective_function)
+    approachinfo = Struct()
+    approachinfo.epsilon_max_value = -np.inf
+    approachinfo.epsilon_min_value = np.inf
 
-    return solutions
+    solutions = heuristica_construtiva(X, Y, H, p, objective_function, approachinfo)
+
+    return solutions, approachinfo
 
 def neighborhood_change(current_solution, new_solution, k):
     if new_solution.penalized_fitness < current_solution.penalized_fitness:
@@ -308,7 +317,7 @@ def shake(solution, k, p):
     return task_move_team(new_solution, p, k)
 
 def GVNS(objective_function, initial_solution, p):
-    max_num_evaluations = 20
+    max_num_evaluations = 50
     num_evaluations = 0
     k_max = 3
     
@@ -339,62 +348,65 @@ def GVNS(objective_function, initial_solution, p):
 
     return current_solution, history
 
-def optimize_instance(objective_function, method, p, initial_solutions, seed):
+def optimize_instance(objective_function, method, approachinfo, p, initial_solutions, seed):
     np.random.seed(seed)
 
-    N = 10
+    N = 20
 
-    approachinfo = []
+    weights = np.linspace(0, 1, N).tolist()
+    epsilons = np.linspace(approachinfo.epsilon_min_value, approachinfo.epsilon_max_value, N).tolist()
+
+    frontiers = []
 
     if method == Method.Sum:
-        for _ in np.arange(N):
+        for i in np.arange(N):
         
-            w = np.random.random(size=2)
-            w = w/sum(w)
+            w = weights[i]
+
+            print(w)
 
             initial_solution = random.sample(initial_solutions, 1)[0]
 
             def fn(solution, p):
                 return objective_function(solution, p, w)
             
-            best_solution, history = GVNS(fn, initial_solution, p)
-            approachinfo.append(best_solution)
+            best_solution, _ = GVNS(fn, initial_solution, p)
+            frontiers.append(best_solution)
 
     elif method == Method.Epsilon:
-        for _ in np.arange(N):
+        for i in np.arange(N):
         
-            w = np.random.random(size=2)
-            w = w/sum(w)
+            epsilon = epsilons[i]
+
+            print(epsilon)
+
+            initial_solution = random.sample(initial_solutions, 1)[0]
 
             def fn(solution, p):
-                return objective_function(solution, p, w)
+                return objective_function(solution, p, epsilon)
             
-            best_solution, history = GVNS(fn, initial_solution, p)
+            best_solution, _ = GVNS(fn, initial_solution, p)
 
-    return approachinfo
+    return frontiers
 
-def select_best_and_random(solutions, top_n=36, random_pick=5):
-    top_solutions = solutions[:top_n]
-    random_solutions = random.sample(top_solutions, random_pick)
-
-    return random_solutions
+def select_best_and_random(solutions, top_n=36):
+    return solutions[:top_n]
 
 class Method(Enum):
-    Sum = 1
-    Epsilon = 2
+    Sum = "PW"
+    Epsilon = "PE"
 
 def optimize(p, objective_function, method: Method):
     results = []
 
-    num_instances = 5
-    percentage_of_solutions_to_pick = 0.3
+    num_instances = 1
+    percentage_of_solutions_to_pick = 0.2
 
-    solutions = initialize_solutions(p, objective_function)
+    solutions, approachinfo = initialize_solutions(p, objective_function)
 
     initial_solutions = select_best_and_random(
         solutions=solutions,
         top_n=int(np.ceil(len(solutions) * percentage_of_solutions_to_pick)),
-        random_pick=num_instances
     )
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
@@ -403,6 +415,7 @@ def optimize(p, objective_function, method: Method):
                 optimize_instance,
                 objective_function,
                 method,
+                approachinfo,
                 copy.deepcopy(p),
                 copy.deepcopy(initial_solutions),
                 seed=np.random.randint(0, 10000)
@@ -534,10 +547,10 @@ def get_non_dominated_solutions(solutions):
             non_dominated.append(sol_i)
     return non_dominated
 
-def weighted_sum(solution, p, weights = [0.5, 0.5]):
+def weighted_sum(solution, p, weight = 1):
     solution_f1 = f1(copy.deepcopy(solution), p)
     solution_f2 = f2(copy.deepcopy(solution), p)
-    solution.penalized_fitness = weights[0] * solution_f1.penalized_fitness + weights[1] * solution_f2.penalized_fitness
+    solution.penalized_fitness = weight * solution_f1.penalized_fitness + (1 - weight) * solution_f2.penalized_fitness
     solution.f1_fitness = solution_f1.penalized_fitness
     solution.f2_fitness = solution_f2.penalized_fitness
     return solution
@@ -545,7 +558,7 @@ def weighted_sum(solution, p, weights = [0.5, 0.5]):
 def epsilon_constraint(solution, p, epsilon = np.inf):
     solution_f1 = f1(copy.deepcopy(solution), p)
     solution_f2 = f2(copy.deepcopy(solution), p)
-    solution.penalized_fitness = solution_f1.penalized_fitness + np.max(0, solution_f2.penalized_fitness - epsilon)
+    solution.penalized_fitness = solution_f1.penalized_fitness + max(0, solution_f2.penalized_fitness - epsilon)**2
     solution.f1_fitness = solution_f1.penalized_fitness
     solution.f2_fitness = solution_f2.penalized_fitness
     return solution
@@ -569,9 +582,10 @@ def plot_pareto_frontier(results, fobj):
     plt.savefig(f"pareto_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
 
 p = probdef()
+
 # PW
 results_pw = optimize(p, weighted_sum, Method.Sum)
-plot_pareto_frontier(results_pw, "PW")
+plot_pareto_frontier(results_pw, Method.Sum)
 """ std_dev_pw, max_sol_pw, min_sol_pw = get_metrics(results_pw)
 
 print(f"Desvio Padrao - PW: {std_dev_pw}")
@@ -579,15 +593,16 @@ print(f"Máximo - PW: {max_sol_pw.penalized_fitness}")
 print(f"Mínimo - PW: {min_sol_pw.penalized_fitness}")
 print(f"Mínimo - PW: {min_sol_pw.penalty}")
 print(f"Fitness - F1: {min_sol_pw.fitness_f1}")
-print(f"Fitness - F2: {min_sol_pw.fitness_f2}") """
+print(f"Fitness - F2: {min_sol_pw.fitness_f2}")
 
-""" plot_convergence(results_pw, "PW")
+plot_convergence(results_pw, "PW")
 visualize_network(p, min_sol_pw, "PW") """
 
-""" # PE
+ # PE
 results_pe = optimize(p, epsilon_constraint, Method.Epsilon)
-std_dev_pe, max_sol_pe, min_sol_pe = get_metrics(results_pe)
+plot_pareto_frontier(results_pw, Method.Epsilon)
 
+"""
 print(f"Desvio Padrao - PE: {std_dev_pe}")
 print(f"Máximo - PE: {max_sol_pe.penalized_fitness}")
 print(f"Mínimo - PE: {min_sol_pe.penalized_fitness}")
