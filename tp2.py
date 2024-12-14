@@ -49,6 +49,26 @@ def parse_failure(df, p):
 def convert_to_float(value):
     return float(value.replace(",", "."))
 
+def calcular_distancia_base_base(p):
+    # Inicializa matriz de distâncias base-base
+    bases = list(p.m)
+    distancia_base_base = pd.DataFrame(
+        index=bases,
+        columns=bases,
+        data=0.0
+    )
+
+    for base1 in bases:
+        for base2 in bases:
+            if base1 != base2:
+                # Calcula distância média entre os ativos de base1 e base2
+                distancias = [
+                    p.d.loc[ativo, base2] for ativo in p.n if p.d.loc[ativo, base1] > 0
+                ]
+                distancia_base_base.loc[base1, base2] = sum(distancias) / len(distancias) if distancias else float('inf')
+
+    return distancia_base_base
+
 def probdef():
     df = pd.read_csv('probdata.csv', names=['lat_b', 'lon_b', 'lat_a', 'lon_a', 'distance'], sep=';')
     df['lat_b'] = df['lat_b'].apply(convert_to_float)
@@ -69,6 +89,8 @@ def probdef():
     probdata.d = parse_dist(df, probdata)
     probdata.p = parse_failure(df_ativos, probdata)
     probdata.eta = 0.2
+
+    probdata.dist_base_base = calcular_distancia_base_base(probdata)
 
     return probdata
 
@@ -279,10 +301,12 @@ def taskMove_Ativo(solution, p):
     return solution
 
 def task_move_team(solution, p, k):
-    # Realocação de uma equipe inteira de uma base para outra, mantendo seus ativos.
+    # Realocação de k equipes inteiras para no máximo 5 locais mais próximos
 
-    bases_disponiveis = copy.deepcopy(p.m)
+    # Identificar as bases disponíveis
+    bases_disponiveis = list(p.m)
 
+    # Obter as bases atualmente ocupadas e as respectivas equipes
     bases_atuais = []
     for base in p.m:
         row = solution.y.loc[base, :]
@@ -290,25 +314,32 @@ def task_move_team(solution, p, k):
             for team, is_allocated in row.items():
                 if is_allocated == 1:
                     bases_atuais.append((base, team))
-            bases_disponiveis.remove(base)
 
-    random.shuffle(bases_atuais)
-    random.shuffle(bases_disponiveis)
+    # Selecionar k bases e equipes para mover
+    selected_bases = random.sample(bases_atuais, min(k, len(bases_atuais)))
 
-    selected_bases = random.sample(bases_atuais, k)
-    bases_to_change = random.sample(bases_disponiveis, k)
+    for base_atual, equipe_atual in selected_bases:
+        # Remover a base atual da lista de disponíveis
+        bases_disponiveis_copy = bases_disponiveis.copy()
+        bases_disponiveis_copy.remove(base_atual)
 
-    for idx in range(k):
-        base_nova = bases_to_change[idx]
-        base_atual = selected_bases[idx][0]
-        equipe_atual = selected_bases[idx][1]
-        solution.y.loc[base_atual, equipe_atual] = 0
-        solution.y.loc[base_nova, equipe_atual] = 1
+        # Calcular as 5 bases mais próximas da base atual usando a matriz base-base
+        distancias = [(base, solution.dist_base_base.loc[base_atual, base]) for base in bases_disponiveis_copy]
+        distancias.sort(key=lambda x: x[1])
+        bases_proximas = [base for base, _ in distancias[:5]]
 
-        for ativo in p.n:
-            if solution.x.loc[ativo, base_atual] == 1:
-                solution.x.loc[ativo, base_atual] = 0
-                solution.x.loc[ativo, base_nova] = 1
+        # Escolher uma nova base aleatoriamente entre as mais próximas
+        if bases_proximas:
+            base_nova = random.choice(bases_proximas)
+
+            # Atualizar a matriz Y para refletir a mudança de base da equipe
+            solution.y.loc[base_atual, equipe_atual] = 0
+            solution.y.loc[base_nova, equipe_atual] = 1
+
+            for ativo in p.n:
+                if solution.x.loc[ativo, base_atual] == 1:
+                    solution.x.loc[ativo, base_atual] = 0
+                    solution.x.loc[ativo, base_nova] = 1
 
     return solution
 
