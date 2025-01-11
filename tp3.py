@@ -341,7 +341,7 @@ def GVNS(objective_function, initial_solution, p):
 
     return current_solution, history
 
-def get_random_initial_solution(p, objective_function):
+def get_initial_solutions(p, objective_function):
     percentage_of_solutions_to_pick = 0.2
 
     solutions, _ = initialize_solutions(p, objective_function)
@@ -349,14 +349,12 @@ def get_random_initial_solution(p, objective_function):
     top_n_sol = int(np.ceil(len(solutions) * percentage_of_solutions_to_pick))
     initial_solutions = solutions[:top_n_sol]
 
-    solution = random.sample(initial_solutions, 1)[0]
-
-    return solution
+    return initial_solutions
 
 def optimize_instance(objective_function, method, p, seed):
     np.random.seed(seed)
 
-    N = 40
+    N = 1
 
     frontiers = []
 
@@ -371,10 +369,11 @@ def optimize_instance(objective_function, method, p, seed):
             def fn(solution, p):
                 return objective_function(solution, p, w)
             
-            initial_solution = get_random_initial_solution(p, fn)
+            initial_solution = get_initial_solutions(p, fn)
             
-            best_solution, _ = GVNS(fn, initial_solution, p)
-            frontiers.append(best_solution)
+            """ best_solution, _ = GVNS(fn, initial_solution, p) """
+            for solution in initial_solution:
+                frontiers.append(solution)
 
     elif method == Method.Epsilon:
         # Determinar max e min de epsilon
@@ -390,10 +389,11 @@ def optimize_instance(objective_function, method, p, seed):
             def fn(solution, p):
                 return objective_function(solution, p, epsilon)
             
-            initial_solution = get_random_initial_solution(p, fn)
+            initial_solution = get_initial_solutions(p, fn)
             
-            best_solution, _ = GVNS(fn, initial_solution, p)
-            frontiers.append(best_solution)
+            """ best_solution, _ = GVNS(fn, initial_solution, p) """
+            for solution in initial_solution:
+                frontiers.append(solution)
 
     return frontiers
 
@@ -404,7 +404,7 @@ class Method(Enum):
 def optimize(p, objective_function, method: Method):
     results = []
 
-    num_instances = 5
+    num_instances = 1
 
     with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         futures = [
@@ -461,7 +461,7 @@ def plot_convergence(results, fobj):
     
     plt.savefig(f"ev_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
 
-def visualize_network(p, solution, fobj):
+def visualize_network(p, solution, idx):
     active_base = []
     available_base = []
     for base in p.m:
@@ -524,7 +524,8 @@ def visualize_network(p, solution, fobj):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
-    plt.savefig(f"network_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
+    plt.savefig(f"img/tp3/network_{idx}.png", format='png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 def dominates(sol_a, sol_b):
     return (sol_a.f1_fitness <= sol_b.f1_fitness and sol_a.f2_fitness <= sol_b.f2_fitness) and (
@@ -558,7 +559,28 @@ def epsilon_constraint(solution, p, epsilon = np.inf):
     solution.f2_fitness = solution_f2.penalized_fitness
     return solution
 
-def plot_pareto_frontier(results, fobj):
+def calculate_balance_deviation(p, sol):
+    carga_por_equipe = []
+    for equipe in p.s:
+        carga_por_equipe.append(sum(sol.h.loc[ativo, equipe] for ativo in p.n))
+    
+    desvio_padrao_carga = np.std(carga_por_equipe)
+    return desvio_padrao_carga
+
+def calculate_distance_deviation(p, sol):
+    distancia_por_equipe = []
+    for equipe in p.s:
+        distancia_total = 0
+        for ativo in p.n:
+            for base in p.m:
+                if sol.x.loc[ativo, base] == 1 and sol.y.loc[base, equipe] == 1:
+                    distancia_total += p.d.loc[ativo, base]
+        distancia_por_equipe.append(distancia_total)
+    
+    desvio_padrao_distancia = np.std(distancia_por_equipe)
+    return desvio_padrao_distancia
+
+def plot_pareto_frontier(p, results, fobj):
     plt.figure(figsize=(10,8))
     colors = plt.cm.viridis(np.linspace(0, 1, len(results)))
 
@@ -573,20 +595,23 @@ def plot_pareto_frontier(results, fobj):
                 f1_values.append(sol.f1_fitness)
                 f2_values.append(sol.f2_fitness)
                 all_results.append(sol)
-        plt.scatter(f1_values, f2_values, color=colors[idx], label=f"Teste {idx+1}")
+        """ plt.scatter(f1_values, f2_values, color="#2F6C96", label=f"Teste {idx+1}") """
 
         nondominated = get_non_dominated_solutions(all_results)
 
-        for sol in nondominated:
+        for idx, sol in enumerate(nondominated):
+            print(f"Sol. nao dominada: F1: {sol.f1_fitness} | F2: {sol.f2_fitness} | STD - Balance: {calculate_balance_deviation(p, sol)} | STD - Dist: {calculate_distance_deviation(p, sol)}")
+            visualize_network(p, sol, idx)
+            plt.scatter(f1_values, f2_values, color="#2F6C96", label=f"Solução" if f"Solução" not in plt.gca().get_legend_handles_labels()[1] else "")
             plt.scatter(
                 sol.f1_fitness,
                 sol.f2_fitness,
                 facecolors="none",
-                edgecolor=colors[idx],
+                edgecolor="#2F6C96",
                 linewidth=1.5,
                 s=100,
                 marker="s",
-                label=f"Fronteira Pareto {idx+1}" if f"Fronteira Pareto {idx+1}" not in plt.gca().get_legend_handles_labels()[1] else "",
+                label=f"Fronteira Pareto" if f"Fronteira Pareto" not in plt.gca().get_legend_handles_labels()[1] else "",
             )
 
     plt.legend(scatterpoints=1, markerscale=1, loc='upper left', 
@@ -595,14 +620,16 @@ def plot_pareto_frontier(results, fobj):
     plt.title('Soluções estimadas')
     plt.xlabel('f1(x)')
     plt.ylabel('f2(x)')
-    plt.savefig(f"pareto_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
+    plt.savefig(f"img/tp3/pareto_{fobj}.png", format='png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 p = probdef()
 
 # PW
 results_pw = optimize(p, weighted_sum, Method.Sum)
-plot_pareto_frontier(results_pw, Method.Sum)
-
+plot_pareto_frontier(p, results_pw, Method.Sum)
+""" 
  # PE
 results_pe = optimize(p, epsilon_constraint, Method.Epsilon)
 plot_pareto_frontier(results_pe, Method.Epsilon)
+ """

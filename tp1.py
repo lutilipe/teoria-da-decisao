@@ -37,6 +37,14 @@ def parse_dist(df, p):
     
     return distance_matrix
 
+def parse_failure(df, p):
+    failure_map = {}
+    for ativo in p.n:
+        filtered_df = df[(df['lat_b'] == ativo[0]) & (df['lon_b'] == ativo[1])]
+        failure_map[ativo] = filtered_df['failure'].tolist()[0]
+    
+    return pd.Series(failure_map)
+
 def convert_to_float(value):
     return float(value.replace(",", "."))
 
@@ -48,11 +56,17 @@ def probdef():
     df['lon_a'] = df['lon_a'].apply(convert_to_float)
     df['distance'] = df['distance'].apply(convert_to_float)
 
+    df_ativos = pd.read_csv('probfalhaativos.csv', names=['lat_b', 'lon_b', 'failure'], sep=';')
+    df_ativos['lat_b'] = df_ativos['lat_b'].apply(convert_to_float)
+    df_ativos['lon_b'] = df_ativos['lon_b'].apply(convert_to_float)
+    df_ativos['failure'] = df_ativos['failure'].apply(convert_to_float)
+
     probdata = Struct()
     probdata.s = [1, 2, 3] # 3
     probdata.n = parse_ativos(df)
     probdata.m = parse_base(df)
     probdata.d = parse_dist(df, probdata)
+    probdata.p = parse_failure(df_ativos, probdata)
     probdata.eta = 0.2
 
     return probdata
@@ -92,12 +106,7 @@ def f1(solution, p):
     return solution
 
 def f2(solution, p):
-    assets_maintained_by_teams = solution.h.sum(axis=0)
-    
-    max_assets_maintained = assets_maintained_by_teams.max()
-    min_assets_maintained = assets_maintained_by_teams.min()
-
-    result = max_assets_maintained - min_assets_maintained
+    result = (p.p.values[:, None] * solution.x.values * p.d.values).sum()
 
     solution.fitness = result
     solution.penalty = penalizacao_restricoes(solution, p)
@@ -307,7 +316,7 @@ def shake(solution, k, p):
     return task_move_team(new_solution, p, k)
 
 def GVNS(objective_function, initial_solution, p):
-    max_num_evaluations = 1000
+    max_num_evaluations = 50
     num_evaluations = 0
     k_max = 3
     
@@ -352,7 +361,7 @@ def select_best_and_random(solutions, top_n=36, random_pick=5):
 def optimize(p, objective_function):
     results = []
 
-    num_instances = 5
+    num_instances = 1
     percentage_of_solutions_to_pick = 0.2
 
     solutions = initialize_solutions(p, objective_function)
@@ -369,7 +378,7 @@ def optimize(p, objective_function):
                 optimize_instance,
                 objective_function,
                 copy.deepcopy(p),
-                initial_solutions[i],
+                solutions[0],
                 seed=np.random.randint(0, 10000)
             )
             for i in range(num_instances)
@@ -485,7 +494,7 @@ def visualize_network(p, solution, fobj):
 
 p = probdef()
 
-# F1
+""" # F1
 results_f1 = optimize(p, f1)
 std_dev_f1, max_sol_f1, min_sol_f1 = get_metrics(results_f1)
 
@@ -495,7 +504,7 @@ print(f"Mínimo - f1: {min_sol_f1.penalized_fitness}")
 print(f"Mínimo - f1: {min_sol_f1.penalty}")
 
 plot_convergence(results_f1, "f1")
-visualize_network(p, min_sol_f1, "f1")
+visualize_network(p, min_sol_f1, "f1") """
 
 # F2
 results_f2 = optimize(p, f2)
